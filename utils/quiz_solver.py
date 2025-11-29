@@ -117,7 +117,7 @@ class QuizSolver:
             log(f"  📥 Downloading {len(question_data['file_urls'])} file(s)...")
             log("\n\n\n")
             print(question_data['file_urls'])
-            question_data['downloaded_files'] = await self.downloadfiles(
+            question_data['downloaded_files'] = await self.download_files(
                 question_data['file_urls']
             )
         
@@ -322,56 +322,128 @@ class QuizSolver:
             'html': html_content
         }
     
-    async def downloadfiles(self, urls: List[str]) -> Dict[str, Any]:
-        """Download files from URLs, convert audio to text"""
+    async def download_files(self, urls: List[str]) -> Dict[str, Any]:
+        """Download files from URLs with retry logic and status checks"""
         files = {}
+        max_retries = 2
         
         for url in urls:
-            try:
-                print("Waiting for download")
-                response = await self.http_client.get(url)
-                response.raise_for_status()
-                content_type = response.headers.get('content-type', '')
-                print("Download Completed")
-                 
-                # Handle audio files
-                if any(ext in url.lower() for ext in ['.opus', '.mp3', '.wav', '.m4a', '.ogg', '.flac']):
-                    audio_data = response.content
-                    audio_text = await self.transcribe_audio(audio_data, url)
-                    files[url] = {
-                        'type': 'audio',
-                        'format': url.split('.')[-1],
-                        'transcription': audio_text,
-                        'base64': base64.b64encode(audio_data).decode()
-                    }
-                
-                # Handle CSV files
-                elif 'csv' in content_type or url.lower().endswith('.csv'):
-                    df = pd.read_csv(io.BytesIO(response.content))
-                    files[url] = {
-                        'type': 'csv',
-                        'dataframe': df,
-                        'data': df.to_dict('records'),
-                        'columns': list(df.columns),
-                        'shape': df.shape
-                    }
-                
-                # Handle other files as before...
-                elif 'pdf' in content_type or url.lower().endswith('.pdf'):
-                    pdf_data = await self.parse_pdf(response.content)
-                    files[url] = pdf_data
-                
-                elif 'json' in content_type or url.lower().endswith('.json'):
-                    files[url] = {'type': 'json', 'data': response.json()}
-                
-                else:
-                    files[url] = {'type': 'text', 'content': response.text}
+            success = False
+            last_error = None
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    print(f"📥 Downloading: {url} (Attempt {attempt + 1}/{max_retries + 1})")
                     
-            except Exception as e:
-                print(f"Error downloading {url}: {e}")
-                files[url] = {'error': str(e)}
+                    # Download with timeout
+                    response = await self.http_client.get(url, timeout=30.0)
+                    
+                    # ✅ CHECK STATUS IMMEDIATELY
+                    if response.status_code != 200:
+                        print(f"   ⚠️  Status {response.status_code}, retrying...")
+                        last_error = f"HTTP {response.status_code}"
+                        await asyncio.sleep(1)  # Wait before retry
+                        continue
+                    
+                    # ✅ Verify content received
+                    content_type = response.headers.get('content-type', '')
+                    content_length = len(response.content)
+                    
+                    if content_length == 0:
+                        print(f"   ⚠️  Empty response, retrying...")
+                        last_error = "Empty response"
+                        await asyncio.sleep(1)
+                        continue
+                    
+                    print(f"   ✓ Downloaded {content_length} bytes (Status: 200 OK)")
+                    
+                    # Handle audio files
+                    if any(ext in url.lower() for ext in ['.opus', '.mp3', '.wav', '.m4a', '.ogg', '.flac']):
+                        audio_data = response.content
+                        audio_text = await self.transcribe_audio(audio_data, url)
+                        files[url] = {
+                            'type': 'audio',
+                            'format': url.split('.')[-1],
+                            'transcription': audio_text,
+                            'base64': base64.b64encode(audio_data).decode()
+                        }
+                        print(f"   🎵 Audio transcribed: {audio_text[:50]}...")
+                    
+                    # Handle CSV files
+                    elif 'csv' in content_type or url.lower().endswith('.csv'):
+                        try:
+                            df = pd.read_csv(io.BytesIO(response.content))
+                            files[url] = {
+                                'type': 'csv',
+                                'dataframe': df,
+                                'data': df.to_dict(orient='records'),
+                                'columns': list(df.columns),
+                                'shape': df.shape
+                            }
+                            print(f"   📊 CSV loaded: {df.shape[0]} rows, {df.shape[1]} columns")
+                        except Exception as e:
+                            print(f"   ❌ CSV parse error: {e}")
+                            files[url] = {'type': 'csv', 'error': str(e)}
+                    
+                    # Handle PDF files
+                    elif 'pdf' in content_type or url.lower().endswith('.pdf'):
+                        try:
+                            pdf_data = await self.parse_pdf(response.content)
+                            files[url] = pdf_data
+                            print(f"   📄 PDF parsed: {pdf_data.get('num_pages', '?')} pages")
+                        except Exception as e:
+                            print(f"   ❌ PDF parse error: {e}")
+                            files[url] = {'type': 'pdf', 'error': str(e)}
+                    
+                    # Handle JSON files
+                    elif 'json' in content_type or url.lower().endswith('.json'):
+                        try:
+                            json_data = response.json()
+                            files[url] = {
+                                'type': 'json',
+                                'data': json_data
+                            }
+                            print(f"   📋 JSON loaded")
+                        except Exception as e:
+                            print(f"   ❌ JSON parse error: {e}")
+                            files[url] = {'type': 'json', 'error': str(e)}
+                    
+                    # Handle other files
+                    else:
+                        files[url] = {
+                            'type': 'binary',
+                            'content': response.text,
+                            'size': content_length
+                        }
+                        print(f"   📦 File stored: {content_length} bytes")
+                    
+                    success = True
+                    break  # ✅ Break on success
+                    
+                except asyncio.TimeoutError:
+                    print(f"   ⏱️  Timeout (Attempt {attempt + 1}), retrying...")
+                    last_error = "Timeout"
+                    if attempt < max_retries:
+                        await asyncio.sleep(2)  # Wait longer before retry
+                        
+                except Exception as e:
+                    print(f"   ❌ Error (Attempt {attempt + 1}): {str(e)}")
+                    last_error = str(e)
+                    if attempt < max_retries:
+                        await asyncio.sleep(1)  # Wait before retry
+            
+            # ✅ If all retries failed, store error
+            if not success:
+                print(f"   ❌ FAILED after {max_retries + 1} attempts: {last_error}")
+                files[url] = {
+                    'type': 'error',
+                    'error': last_error,
+                    'attempts': max_retries + 1
+                }
         
+        print(f"\n✅ Download complete: {len(files)} files processed")
         return files
+
 
     async def transcribe_audio(self, audio_bytes: bytes, url: str) -> str:
         """Transcribe audio file using speech-to-text with proper ffmpeg handling"""
@@ -452,7 +524,6 @@ class QuizSolver:
             import traceback
             traceback.print_exc()
             return f"Transcription error: {str(e)}"
-
 
     async def _parse_pdf(self, pdf_bytes: bytes) -> Dict[str, Any]:
         """Parse PDF file"""
