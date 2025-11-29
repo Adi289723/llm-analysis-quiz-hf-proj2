@@ -1,14 +1,22 @@
-FROM python:3.11-slim
+FROM ubuntu:22.04
 
-# Set working directory
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
+
 WORKDIR /app
 
-# Install system dependencies for Playwright and Chromium
+# Install all system dependencies
 RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
     wget \
     gnupg \
     ca-certificates \
-    fonts-liberation \
+    ffmpeg \
+    libopus0 \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -29,27 +37,36 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     libu2f-udev \
     libvulkan1 \
+    fonts-liberation \
+    fonts-noto \
+    fonts-unifont \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY requirements.txt .
+# Upgrade pip
+RUN python3 -m pip install --no-cache-dir --upgrade pip
 
-# Install Python dependencies
+# Copy and install requirements
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright and Chromium browser
-RUN playwright install chromium
-RUN playwright install-deps chromium
+# ✅ INSTALL PLAYWRIGHT BROWSERS TO /app/browsers (will be included in image)
+RUN PLAYWRIGHT_BROWSERS_PATH=/app/browsers python3 -m playwright install chromium
 
-# Copy application code
-COPY . .
+# Create non-root user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+
+# Copy application
+COPY --chown=appuser:appuser . .
+
+# Switch to non-root user
+USER appuser
 
 # Expose port
 EXPOSE 7860
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:7860/health', timeout=5)"
+    CMD python3 -c "import requests; requests.get('http://localhost:7860/health', timeout=5)"
 
-# Run the application
+# Run application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
