@@ -22,7 +22,7 @@ class QuizSolver:
     
     def __init__(self):
         self.llm = LLMHandler()
-        self.http_client = httpx.AsyncClient(timeout=60.0)
+        self.http_client = httpx.AsyncClient(timeout=30.0)
         self.start_time = None
     
     async def solve_quiz_chain(
